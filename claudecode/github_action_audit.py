@@ -240,17 +240,6 @@ class SimpleClaudeRunner:
                     timeout=self.timeout_seconds
                 )
                 
-                if result.returncode != 0:
-                    if attempt == NUM_RETRIES - 1:
-                        error_details = f"Claude Code execution failed with return code {result.returncode}\n"
-                        error_details += f"Stderr: {result.stderr}\n"
-                        error_details += f"Stdout: {result.stdout[:500]}..."  # First 500 chars
-                        return False, error_details, {}
-                    else:
-                        time.sleep(5*attempt)
-                        # Note: We don't do exponential backoff here to keep the runtime reasonable
-                        continue  # Retry
-                
                 # Parse JSON output
                 success, parsed_result = parse_json_with_fallbacks(result.stdout, "Claude Code output")
                 
@@ -269,6 +258,17 @@ class SimpleClaudeRunner:
                         parsed_result.get('subtype') == 'error_during_execution' and
                         attempt == 0):
                         continue  # Retry
+
+                    if result.returncode != 0 and parsed_result.get('is_error'):
+                        if attempt == NUM_RETRIES - 1:
+                            error_details = f"Claude Code execution failed with return code {result.returncode}\n"
+                            error_details += f"Stderr: {result.stderr}\n"
+                            error_details += f"Stdout: {result.stdout[:500]}..."  # First 500 chars
+                            return False, error_details, {}
+                        else:
+                            time.sleep(5*attempt)
+                            # Note: We don't do exponential backoff here to keep the runtime reasonable
+                            continue  # Retry
                     
                     # Extract security findings
                     parsed_results = self._extract_security_findings(parsed_result)
