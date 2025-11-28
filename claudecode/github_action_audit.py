@@ -81,6 +81,7 @@ class GitHubActionClient:
         all_files = []
         page = 1
         max_pages = 30  # 30 pages × 100 files = 3000 files max (GitHub API limit)
+        hit_api_limit = False
         
         while page <= max_pages:
             files_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page=100&page={page}"
@@ -98,9 +99,66 @@ class GitHubActionClient:
                 break
             
             page += 1
+            
+            # Check if we hit the limit but there might be more files
+            if page > max_pages and len(files_page) == 100:
+                hit_api_limit = True
         
         files_data = all_files
-        print(f"[Debug] Fetched {len(files_data)} files across {page} page(s)", file=sys.stderr)
+        print(f"[Debug] Fetched {len(files_data)} files across {page} page(s) from API", file=sys.stderr)
+        
+        # If we hit the API limit, try to get complete file list from local git
+        if hit_api_limit:
+            print(f"[Warning] Hit GitHub API limit (3000 files). Attempting to get full file list from local git...", file=sys.stderr)
+            try:
+                # Try to get complete file list using local git
+                base_sha = pr_data['base']['sha']
+                head_sha = pr_data['head']['sha']
+                
+                print(f"[Debug] GITHUB_WORKSPACE: {os.environ.get('GITHUB_WORKSPACE', '.')}", file=sys.stderr)
+
+                # Use git diff to get all changed files
+                result = subprocess.run(
+                    ['git', 'diff', '--name-status', f"{base_sha}...{head_sha}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    cwd=os.environ.get('GITHUB_WORKSPACE', '.')
+                )
+                
+                if result.returncode == 0:
+                    # Parse git output: format is "STATUS\tFILENAME"
+                    git_files = []
+                    for line in result.stdout.strip().split('\n'):
+                        if line:
+                            parts = line.split('\t', 1)
+                            if len(parts) == 2:
+                                status_code, filename = parts
+                                # Map git status to GitHub status
+                                status_map = {'A': 'added', 'M': 'modified', 'D': 'deleted', 'R': 'renamed', 'C': 'copied'}
+                                status = status_map.get(status_code[0], 'modified')
+                                
+                                # Check if file already in API results
+                                if not any(f['filename'] == filename for f in files_data):
+                                    git_files.append({
+                                        'filename': filename,
+                                        'status': status,
+                                        'additions': 0,  # Not available from git diff --name-status
+                                        'deletions': 0,
+                                        'changes': 0,
+                                        'patch': ''
+                                    })
+                    
+                    if git_files:
+                        files_data.extend(git_files)
+                        print(f"[Info] Added {len(git_files)} additional files from local git. Total: {len(files_data)} files", file=sys.stderr)
+                else:
+                    print(f"[Warning] Git command failed: {result.stderr}. Continuing with {len(files_data)} files from API.", file=sys.stderr)
+                    
+            except subprocess.TimeoutExpired:
+                print(f"[Warning] Git command timed out. Continuing with {len(files_data)} files from API.", file=sys.stderr)
+            except Exception as e:
+                print(f"[Warning] Failed to get files from local git: {e}. Continuing with {len(files_data)} files from API.", file=sys.stderr)
         
         return {
             'number': pr_data['number'],
