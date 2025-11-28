@@ -29,6 +29,9 @@ from claudecode.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Special marker for diff too large error
+DIFF_TOO_LARGE = "DIFF_TOO_LARGE"
+
 class ConfigurationError(ValueError):
     """Raised when configuration is invalid or missing."""
     pass
@@ -75,10 +78,29 @@ class GitHubActionClient:
         pr_data = response.json()
         
         # Get PR files with pagination support
-        files_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page=100"
-        response = requests.get(files_url, headers=self.headers)
-        response.raise_for_status()
-        files_data = response.json()
+        all_files = []
+        page = 1
+        max_pages = 30  # 30 pages × 100 files = 3000 files max (GitHub API limit)
+        
+        while page <= max_pages:
+            files_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page=100&page={page}"
+            response = requests.get(files_url, headers=self.headers)
+            response.raise_for_status()
+            files_page = response.json()
+            
+            if not files_page:  # No more files
+                break
+            
+            all_files.extend(files_page)
+            
+            # If we got less than per_page, we've reached the end
+            if len(files_page) < 100:
+                break
+            
+            page += 1
+        
+        files_data = all_files
+        print(f"[Debug] Fetched {len(files_data)} files across {page} page(s)", file=sys.stderr)
         
         return {
             'number': pr_data['number'],
@@ -131,6 +153,22 @@ class GitHubActionClient:
         headers['Accept'] = 'application/vnd.github.diff'
         
         response = requests.get(url, headers=headers)
+        if not response.ok:
+            try:
+                response_json = response.json()
+                # Check if this is a "diff too large" error
+                if response_json.get('errors'):
+                    for error in response_json.get('errors', []):
+                        if error.get('code') == 'too_large':
+                            print(f"[Warning] PR diff exceeds GitHub's limit (300 files): {response_json.get('message')}", file=sys.stderr)
+                            return DIFF_TOO_LARGE
+                
+                # Print other error messages
+                if response_json.get('message'):
+                    print(f"[Debug] API Error: {response_json.get('message')}", file=sys.stderr)
+            except Exception as e:
+                print(f"[Debug] Response Status: {response.status_code}, Body: {response.text}", file=sys.stderr)
+            
         response.raise_for_status()
         
         return self._filter_generated_files(response.text)
@@ -585,7 +623,16 @@ def main():
         # Get repo directory from environment or use current directory
         repo_path = os.environ.get('REPO_PATH')
         repo_dir = Path(repo_path) if repo_path else Path.cwd()
-        success, error_msg, results = claude_runner.run_security_audit(repo_dir, prompt)
+        
+        if pr_diff == DIFF_TOO_LARGE:
+            print(f"[Info] PR diff too long, trying without diff.", file=sys.stderr)
+            prompt_without_diff = get_security_audit_prompt(pr_data, pr_diff, include_diff=False, custom_scan_instructions=custom_scan_instructions)
+            print(f"[Info] Prompt length: {len(prompt_without_diff)} characters", file=sys.stderr)
+            success, error_msg, results = claude_runner.run_security_audit(repo_dir, prompt_without_diff)
+            print(f"[Info] success: {success} error_msg: {error_msg} results: {results}", file=sys.stderr)
+        else:
+            success, error_msg, results = claude_runner.run_security_audit(repo_dir, prompt)
+            print(f"[Info] success: {success} error_msg: {error_msg} results: {results}", file=sys.stderr)
         
         # If prompt is too long, retry without diff
         if not success and error_msg == "PROMPT_TOO_LONG":
@@ -593,6 +640,7 @@ def main():
             prompt_without_diff = get_security_audit_prompt(pr_data, pr_diff, include_diff=False, custom_scan_instructions=custom_scan_instructions)
             print(f"[Info] New prompt length: {len(prompt_without_diff)} characters", file=sys.stderr)
             success, error_msg, results = claude_runner.run_security_audit(repo_dir, prompt_without_diff)
+            print(f"[Info] success: {success} error_msg: {error_msg} results: {results}", file=sys.stderr)
         
         if not success:
             print(json.dumps({'error': f'Security audit failed: {error_msg}'}))
