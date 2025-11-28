@@ -114,16 +114,34 @@ class GitHubActionClient:
                 # Try to get complete file list using local git
                 base_sha = pr_data['base']['sha']
                 head_sha = pr_data['head']['sha']
+                base_ref = pr_data['base']['ref']
+                head_ref = pr_data['head']['ref']
                 
-                print(f"[Debug] GITHUB_WORKSPACE: {os.environ.get('GITHUB_WORKSPACE', '.')}", file=sys.stderr)
+                workspace = os.environ.get('GITHUB_WORKSPACE', '.')
+                print(f"[Debug] GITHUB_WORKSPACE: {workspace}", file=sys.stderr)
+                print(f"[Debug] Comparing {base_ref} ({base_sha[:7]}) ... {head_ref} ({head_sha[:7]})", file=sys.stderr)
+                
+                # First, try to fetch the base and head refs to ensure commits are available
+                # This is needed because GitHub Actions uses shallow clones by default
+                fetch_commands = [
+                    ['git', 'fetch', '--depth=1', 'origin', base_ref],
+                    ['git', 'fetch', '--depth=1', 'origin', f'pull/{pr_data["number"]}/head']
+                ]
+                
+                for cmd in fetch_commands:
+                    try:
+                        subprocess.run(cmd, capture_output=True, timeout=30, cwd=workspace, check=False)
+                    except Exception:
+                        pass  # Ignore fetch errors, we'll try diff anyway
 
                 # Use git diff to get all changed files
+                # Use two-dot syntax (..) which is more reliable than three-dot (...)
                 result = subprocess.run(
                     ['git', 'diff', '--name-status', f"{base_sha}..{head_sha}"],
                     capture_output=True,
                     text=True,
                     timeout=30,
-                    cwd=os.environ.get('GITHUB_WORKSPACE', '.')
+                    cwd=workspace
                 )
                 
                 if result.returncode == 0:
