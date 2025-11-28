@@ -119,7 +119,7 @@ class GitHubActionClient:
 
                 # Use git diff to get all changed files
                 result = subprocess.run(
-                    ['git', 'diff', '--name-status', f"{base_sha}...{head_sha}"],
+                    ['git', 'diff', '--name-status', f"{base_sha}..{head_sha}"],
                     capture_output=True,
                     text=True,
                     timeout=30,
